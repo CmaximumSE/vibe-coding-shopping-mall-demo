@@ -6,19 +6,39 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
-// Import routes
-const authRoutes = require('./routes/auth');
-const productRoutes = require('./routes/products');
-const userRoutes = require('./routes/users');
-const orderRoutes = require('./routes/orders');
-const userCrudRoutes = require('./routes/userCrud');
-const cartRoutes = require('./routes/cart');
+// Import routes with error handling
+let authRoutes, productRoutes, userRoutes, orderRoutes, userCrudRoutes, cartRoutes;
+
+try {
+  authRoutes = require('./routes/auth');
+  productRoutes = require('./routes/products');
+  userRoutes = require('./routes/users');
+  orderRoutes = require('./routes/orders');
+  userCrudRoutes = require('./routes/userCrud');
+  cartRoutes = require('./routes/cart');
+  console.log('✅ 모든 라우트가 성공적으로 로드되었습니다');
+} catch (error) {
+  console.error('❌ 라우트 로딩 실패:', error.message);
+  console.error('서버는 계속 실행되지만 해당 라우트는 사용할 수 없습니다.');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3002;
 
-// Security middleware
-app.use(helmet());
+// 서버 시작 전 초기화 로그
+console.log('='.repeat(50));
+console.log('🚀 Shopping Mall Server 초기화 시작');
+console.log('='.repeat(50));
+console.log(`📍 포트: ${PORT}`);
+console.log(`🌍 환경: ${process.env.NODE_ENV || 'development'}`);
+console.log(`📦 Node.js 버전: ${process.version}`);
+console.log('='.repeat(50));
+
+// Security middleware (Cloudtype 호환성을 위해 일부 설정 완화)
+app.use(helmet({
+  contentSecurityPolicy: false, // Cloudtype 프록시와의 호환성
+  crossOriginEmbedderPolicy: false
+}));
 
 // Rate limiting
 const limiter = rateLimit({
@@ -35,19 +55,36 @@ const allowedOrigins = process.env.CLIENT_URL
   ? process.env.CLIENT_URL.split(',').map(url => url.trim())
   : ['http://localhost:3000', 'http://localhost:5173'];
 
+// Health check나 서버 내부 요청을 위해 더 유연한 CORS 설정
 app.use(cors({
   origin: function (origin, callback) {
-    // origin이 없으면 (모바일 앱, Postman 등) 허용
-    if (!origin) return callback(null, true);
-    
-    // 개발 환경이거나 허용된 origin이면 통과
-    if (process.env.NODE_ENV !== 'production' || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('CORS 정책에 의해 차단되었습니다'));
+    // origin이 없으면 허용 (서버 간 통신, health check 등)
+    if (!origin) {
+      return callback(null, true);
     }
+    
+    // 개발 환경에서는 모든 origin 허용
+    if (process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    
+    // 허용된 origin이면 통과
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    }
+    
+    // Cloudtype이나 내부 요청인 경우 허용
+    if (origin.includes('cloudtype') || origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+    
+    // 그 외의 경우 경고만 하고 허용 (배포 시 보안 강화 필요)
+    console.warn(`⚠️  CORS: 허용되지 않은 origin에서 요청: ${origin}`);
+    return callback(null, true);
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // Body parsing middleware
@@ -68,9 +105,14 @@ const RETRY_DELAY = 5000; // 5초
 
 const connectMongoDB = async () => {
   try {
+    console.log('🔄 MongoDB 연결 시도 중...');
     await mongoose.connect(mongoUrl, {
-      serverSelectionTimeoutMS: 5000, // 5초 타임아웃
+      serverSelectionTimeoutMS: 10000, // 10초 타임아웃 (Cloudtype에서 더 길게)
       socketTimeoutMS: 45000,
+      connectTimeoutMS: 10000,
+      maxPoolSize: 10,
+      retryWrites: true,
+      w: 'majority'
     });
     mongoConnected = true;
     mongoRetryCount = 0;
@@ -121,13 +163,13 @@ mongoose.connection.on('error', (error) => {
   mongoConnected = false;
 });
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/products', productRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/orders', orderRoutes);
-app.use('/api/user-crud', userCrudRoutes);
-app.use('/api/cart', cartRoutes);
+// Routes (라우트가 로드된 경우에만 사용)
+if (authRoutes) app.use('/api/auth', authRoutes);
+if (productRoutes) app.use('/api/products', productRoutes);
+if (userRoutes) app.use('/api/users', userRoutes);
+if (orderRoutes) app.use('/api/orders', orderRoutes);
+if (userCrudRoutes) app.use('/api/user-crud', userCrudRoutes);
+if (cartRoutes) app.use('/api/cart', cartRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -171,8 +213,67 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
+// Start server with error handling
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 서버가 포트 ${PORT}에서 실행 중입니다`);
   console.log(`📍 환경: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 서버 URL: http://0.0.0.0:${PORT}`);
+  console.log(`✅ Health check: http://0.0.0.0:${PORT}/api/health`);
+});
+
+// Server error handling
+server.on('error', (error) => {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  const bind = typeof PORT === 'string' ? 'Pipe ' + PORT : 'Port ' + PORT;
+
+  switch (error.code) {
+    case 'EACCES':
+      console.error(`❌ ${bind} requires elevated privileges`);
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(`❌ ${bind} is already in use`);
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM 신호를 받았습니다. 서버를 종료합니다...');
+  server.close(() => {
+    console.log('서버가 종료되었습니다.');
+    mongoose.connection.close(false, () => {
+      console.log('MongoDB 연결이 종료되었습니다.');
+      process.exit(0);
+    });
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT 신호를 받았습니다. 서버를 종료합니다...');
+  server.close(() => {
+    console.log('서버가 종료되었습니다.');
+    mongoose.connection.close(false, () => {
+      console.log('MongoDB 연결이 종료되었습니다.');
+      process.exit(0);
+    });
+  });
+});
+
+// Unhandled promise rejection
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // 서버를 종료하지 않고 로그만 출력
+});
+
+// Uncaught exception
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // 서버를 종료하지 않고 로그만 출력
 });
